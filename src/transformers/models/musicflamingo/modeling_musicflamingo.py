@@ -45,17 +45,8 @@ from .configuration_musicflamingo import MusicFlamingoConfig, MusicFlamingoEncod
 logger = logging.get_logger(__name__)
 
 
-###################################################################################################
-###################################################################################################
-###################################################################################################
-
-
 def exists(val):
     return val is not None
-
-
-def default(val, d):
-    return val if exists(val) else d
 
 
 # rotary embedding helper functions
@@ -123,8 +114,8 @@ class RotaryEmbedding(Module):
         self.cache_if_possible = cache_if_possible
         self.max_time = max_time
 
-        self.tmp_store("cached_freqs", None)
-        self.tmp_store("cached_scales", None)
+        self.register_buffer("cached_freqs", None, persistent=False)
+        self.register_buffer("cached_scales", None, persistent=False)
 
         # Adjust theta to avoid angle wrapping after large times
         if exists(max_time) and freqs_for == "lang":
@@ -152,7 +143,7 @@ class RotaryEmbedding(Module):
 
         # dummy for device
 
-        self.tmp_store("dummy", torch.tensor(0))
+        self.register_buffer("dummy", torch.tensor(0), persistent=False)
 
         # default sequence dimension
 
@@ -166,12 +157,12 @@ class RotaryEmbedding(Module):
 
         # xpos
         if not use_xpos:
-            self.tmp_store("scale", None)
+            self.register_buffer("scale", None, persistent=False)
             return
 
         scale = (torch.arange(0, dim, 2) + 0.4 * dim) / (1.4 * dim)
         self.scale_base = xpos_scale_base
-        self.tmp_store("scale", scale)
+        self.register_buffer("scale", scale, persistent=False)
 
         # add apply_rotary_emb as static method
 
@@ -180,86 +171,6 @@ class RotaryEmbedding(Module):
     @property
     def device(self):
         return self.dummy.device
-
-    def tmp_store(self, key, value):
-        self.register_buffer(key, value, persistent=False)
-
-    def get_seq_pos(self, seq_len, device, dtype, offset=0):
-        return (torch.arange(seq_len, device=device, dtype=dtype) + offset) / self.interpolate_factor
-
-    def rotate_queries_or_keys(self, t, seq_dim=None, offset=0):
-        seq_dim = default(seq_dim, self.default_seq_dim)
-
-        assert not self.use_xpos, (
-            "you must use `.rotate_queries_and_keys` method instead and pass in both queries and keys, for length extrapolatable rotary embeddings"
-        )
-
-        device, dtype, seq_len = t.device, t.dtype, t.shape[seq_dim]
-
-        freqs = self.forward(
-            self.get_seq_pos(seq_len, device=device, dtype=dtype, offset=offset), seq_len=seq_len, offset=offset
-        )
-
-        if seq_dim == -3:
-            freqs = freqs.unsqueeze(1)
-
-        return apply_rotary_emb(freqs, t, seq_dim=seq_dim)
-
-    def rotate_queries_with_cached_keys(self, q, k, seq_dim=None, offset=0):
-        seq_dim = default(seq_dim, self.default_seq_dim)
-
-        q_len, k_len = q.shape[seq_dim], k.shape[seq_dim]
-        assert q_len <= k_len
-
-        rotated_q = self.rotate_queries_or_keys(q, seq_dim=seq_dim, offset=k_len - q_len + offset)
-        rotated_k = self.rotate_queries_or_keys(k, seq_dim=seq_dim, offset=offset)
-
-        rotated_q = rotated_q.type(q.dtype)
-        rotated_k = rotated_k.type(k.dtype)
-
-        return rotated_q, rotated_k
-
-    def rotate_queries_and_keys(self, q, k, seq_dim=None):
-        seq_dim = default(seq_dim, self.default_seq_dim)
-
-        assert self.use_xpos
-        device, dtype, seq_len = q.device, q.dtype, q.shape[seq_dim]
-
-        seq = self.get_seq_pos(seq_len, dtype=dtype, device=device)
-
-        freqs = self.forward(seq, seq_len=seq_len)
-        scale = self.get_scale(seq, seq_len=seq_len).to(dtype)
-
-        if seq_dim == -3:
-            freqs = freqs.unsqueeze(1)
-            scale = scale.unsqueeze(1)
-
-        rotated_q = apply_rotary_emb(freqs, q, scale=scale, seq_dim=seq_dim)
-        rotated_k = apply_rotary_emb(freqs, k, scale=scale**-1, seq_dim=seq_dim)
-
-        rotated_q = rotated_q.type(q.dtype)
-        rotated_k = rotated_k.type(k.dtype)
-
-        return rotated_q, rotated_k
-
-    def get_scale(self, t: Tensor, seq_len: int | None = None, offset=0):
-        assert self.use_xpos
-
-        should_cache = self.cache_if_possible and exists(seq_len)
-
-        if should_cache and exists(self.cached_scales) and (seq_len + offset) <= self.cached_scales.shape[0]:
-            return self.cached_scales[offset : (offset + seq_len)]
-
-        scale = 1.0
-        if self.use_xpos:
-            power = (t - len(t) // 2) / self.scale_base
-            scale = self.scale ** power.unsqueeze(-1)
-            scale = torch.cat((scale, scale), dim=-1)
-
-        if should_cache:
-            self.tmp_store("cached_scales", scale)
-
-        return scale
 
     def get_axial_freqs(self, *dims):
         Colon = slice(None)
@@ -301,7 +212,7 @@ class RotaryEmbedding(Module):
         freqs = torch.repeat_interleave(freqs, 2, dim=-1)
 
         if should_cache:
-            self.tmp_store("cached_freqs", freqs.detach())
+            self.register_buffer("cached_freqs", freqs.detach(), persistent=False)
 
         return freqs
 
