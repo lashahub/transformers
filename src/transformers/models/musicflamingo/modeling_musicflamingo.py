@@ -86,14 +86,7 @@ class RotaryEmbedding(Module):
     def __init__(
         self,
         dim,
-        custom_freqs: Tensor | None = None,
-        freqs_for="lang",
         theta=50000,
-        max_freq=10,
-        num_freqs=1,
-        learned_freq=False,
-        use_xpos=False,
-        xpos_scale_base=512,
         interpolate_factor=1.0,
         theta_rescale_factor=1.0,
         seq_before_head_dim=False,
@@ -103,22 +96,15 @@ class RotaryEmbedding(Module):
         super().__init__()
 
         self.dim = dim
-        self.freqs_for = freqs_for
-        self.max_freq = max_freq
-        self.num_freqs = num_freqs
-        self.learned_freq = learned_freq
-        self.use_xpos = use_xpos
-        self.xpos_scale_base = xpos_scale_base
         self.interpolate_factor = interpolate_factor
         self.theta_rescale_factor = theta_rescale_factor
         self.cache_if_possible = cache_if_possible
         self.max_time = max_time
 
         self.register_buffer("cached_freqs", None, persistent=False)
-        self.register_buffer("cached_scales", None, persistent=False)
 
         # Adjust theta to avoid angle wrapping after large times
-        if exists(max_time) and freqs_for == "lang":
+        if exists(max_time):
             # Make sure highest frequency completes 1 full rotation over max time
             # theta = base of exponent: higher theta → lower frequency range
             # max_time * (1/theta^(0)) = 2pi  =>  theta = max_time / (2pi)
@@ -128,18 +114,9 @@ class RotaryEmbedding(Module):
 
         self.theta = theta
 
-        if exists(custom_freqs):
-            freqs = custom_freqs
-        elif freqs_for == "lang":
-            freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-        elif freqs_for == "pixel":
-            freqs = torch.linspace(1.0, max_freq / 2, dim // 2) * pi
-        elif freqs_for == "constant":
-            freqs = torch.ones(num_freqs).float()
+        freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
-        self.freqs = nn.Parameter(freqs, requires_grad=learned_freq)
-
-        self.learned_freq = learned_freq
+        self.freqs = nn.Parameter(freqs, requires_grad=False)
 
         # dummy for device
 
@@ -155,15 +132,6 @@ class RotaryEmbedding(Module):
         assert interpolate_factor >= 1.0
         self.interpolate_factor = interpolate_factor
 
-        # xpos
-        if not use_xpos:
-            self.register_buffer("scale", None, persistent=False)
-            return
-
-        scale = (torch.arange(0, dim, 2) + 0.4 * dim) / (1.4 * dim)
-        self.scale_base = xpos_scale_base
-        self.register_buffer("scale", scale, persistent=False)
-
         # add apply_rotary_emb as static method
 
         self.apply_rotary_emb = staticmethod(apply_rotary_emb)
@@ -177,10 +145,7 @@ class RotaryEmbedding(Module):
         all_freqs = []
 
         for ind, dim in enumerate(dims):
-            if self.freqs_for == "pixel":
-                pos = torch.linspace(-1, 1, steps=dim, device=self.device)
-            else:
-                pos = torch.arange(dim, device=self.device)
+            pos = torch.arange(dim, device=self.device)
 
             freqs = self.forward(pos, seq_len=dim)
 
@@ -195,9 +160,7 @@ class RotaryEmbedding(Module):
 
     @autocast("cuda", enabled=False)
     def forward(self, t: Tensor, seq_len=None, offset=0):
-        should_cache = (
-            self.cache_if_possible and not self.learned_freq and exists(seq_len) and self.freqs_for != "pixel"
-        )
+        should_cache = self.cache_if_possible and exists(seq_len)
 
         if should_cache and exists(self.cached_freqs) and (offset + seq_len) <= self.cached_freqs.shape[0]:
             return self.cached_freqs[offset : (offset + seq_len)].detach()
@@ -234,13 +197,11 @@ class MusicFlamingoPreTrainedModel(PreTrainedModel):
         if isinstance(module, RotaryEmbedding):
             # Reinitialize freqs parameter
             dim = module.dim
-            freqs_for = module.freqs_for
             max_time = module.max_time
             theta_rescale_factor = module.theta_rescale_factor
-            custom_freqs = None
 
             # Adjust theta
-            if max_time is not None and freqs_for == "lang":
+            if max_time is not None:
                 theta = max_time / (2 * pi)
             else:
                 theta = 50000  # default value
@@ -248,24 +209,12 @@ class MusicFlamingoPreTrainedModel(PreTrainedModel):
             theta *= theta_rescale_factor ** (dim / (dim - 2))
 
             # Generate freqs
-            if custom_freqs is not None:
-                freqs = custom_freqs
-            elif freqs_for == "lang":
-                freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-            elif freqs_for == "pixel":
-                freqs = torch.linspace(1.0, module.max_freq / 2, dim // 2) * pi
-            elif freqs_for == "constant":
-                freqs = torch.ones(module.num_freqs).float()
+            freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
             module.freqs.data = freqs
 
             # Reinitialize dummy buffer
             module.dummy.data = torch.tensor(0)
-
-            # Reinitialize scale if using xpos
-            if module.use_xpos and module.scale is not None:
-                scale = (torch.arange(0, dim, 2) + 0.4 * dim) / (1.4 * dim)
-                module.scale.data = scale
         else:
             # Delegate to parent class for other modules
             super()._init_weights(module)
@@ -519,7 +468,7 @@ class MusicFlamingoEncoder(MusicFlamingoPreTrainedModel):
         self.avg_pooler = nn.AvgPool1d(2, stride=2)
 
         self.gradient_checkpointing = False
-        self.pos_emb = RotaryEmbedding(dim=256, freqs_for="lang", max_time=1200.0)
+        self.pos_emb = RotaryEmbedding(dim=256, max_time=1200.0)
         # Initialize weights and apply final processing
         self.post_init()
 
