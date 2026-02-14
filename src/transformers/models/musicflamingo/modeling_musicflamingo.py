@@ -57,13 +57,14 @@ class MusicFlamingoRotaryEmbedding(Module):
         self.dim = dim
         self.max_time = max_time
 
-        self.register_buffer("cached_freqs", None, persistent=False)
-
         theta = max_time / (2 * pi) if max_time is not None else 50000
 
         freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
         self.freqs = nn.Parameter(freqs, requires_grad=False)
+
+        cached_freqs = self._build_cached_freqs(freqs)
+        self.register_buffer("cached_freqs", cached_freqs, persistent=False)
 
         # dummy for device
 
@@ -72,6 +73,15 @@ class MusicFlamingoRotaryEmbedding(Module):
     @property
     def device(self):
         return self.dummy.device
+
+    def _build_cached_freqs(self, freqs, device=None, dtype=None):
+        if self.max_time is None:
+            return None
+
+        positions = torch.arange(int(self.max_time), device=device, dtype=dtype if dtype is not None else freqs.dtype)
+        positions = positions / self.max_time * (2 * pi)
+        cached_freqs = positions.unsqueeze(-1) * freqs
+        return torch.repeat_interleave(cached_freqs, 2, dim=-1)
 
     def get_axial_freqs(self, *dims):
         Colon = slice(None)
@@ -93,22 +103,17 @@ class MusicFlamingoRotaryEmbedding(Module):
 
     @autocast("cuda", enabled=False)
     def forward(self, t: Tensor, seq_len=None, offset=0):
-        should_cache = seq_len is not None
-
-        if should_cache and self.cached_freqs is not None and (offset + seq_len) <= self.cached_freqs.shape[0]:
+        if seq_len is not None and self.cached_freqs is not None and (offset + seq_len) <= self.cached_freqs.shape[0]:
             return self.cached_freqs[offset : (offset + seq_len)].detach()
 
         freqs = self.freqs
 
         # Scale time to keep t * freq <= 2pi
-        if hasattr(self, "max_time") and self.max_time is not None:
+        if self.max_time is not None:
             t = t / self.max_time * (2 * pi)
 
         freqs = t.type(freqs.dtype).unsqueeze(-1) * freqs
         freqs = torch.repeat_interleave(freqs, 2, dim=-1)
-
-        if should_cache:
-            self.register_buffer("cached_freqs", freqs.detach(), persistent=False)
 
         return freqs
 
@@ -141,6 +146,10 @@ class MusicFlamingoPreTrainedModel(PreTrainedModel):
             freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
             module.freqs.data = freqs
+
+            module.cached_freqs = module._build_cached_freqs(
+                module.freqs, device=module.freqs.device, dtype=module.freqs.dtype
+            )
 
             # Reinitialize dummy buffer
             module.dummy.data = torch.tensor(0)
