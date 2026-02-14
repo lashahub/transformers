@@ -16,7 +16,7 @@
 from math import pi
 
 import torch
-from torch import Tensor, broadcast_tensors, einsum, nn
+from torch import Tensor, broadcast_tensors, nn
 from torch.amp import autocast
 from torch.nn import Module
 
@@ -128,7 +128,7 @@ class MusicFlamingoRotaryEmbedding(Module):
         if hasattr(self, "max_time") and self.max_time is not None:
             t = t / self.max_time * (2 * pi)
 
-        freqs = einsum("..., f -> ... f", t.type(freqs.dtype), freqs)
+        freqs = t.type(freqs.dtype).unsqueeze(-1) * freqs
         freqs = torch.repeat_interleave(freqs, 2, dim=-1)
 
         if should_cache:
@@ -141,6 +141,9 @@ class MusicFlamingoPreTrainedModel(AudioFlamingo3PreTrainedModel):
     @torch.no_grad()
     def _init_weights(self, module):
         """Initialize the weights for MusicFlamingo-specific modules."""
+        parent_init_weights = super()._init_weights
+        parent_init_weights(module)
+
         if isinstance(module, MusicFlamingoRotaryEmbedding):
             # Reinitialize freqs parameter
             dim = module.dim
@@ -155,9 +158,6 @@ class MusicFlamingoPreTrainedModel(AudioFlamingo3PreTrainedModel):
 
             # Reinitialize dummy buffer
             module.dummy.data = torch.tensor(0)
-        else:
-            # Delegate to parent class for other modules
-            super()._init_weights(module)
 
 
 @auto_docstring(
