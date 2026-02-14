@@ -37,10 +37,6 @@ from .configuration_musicflamingo import MusicFlamingoConfig
 logger = logging.get_logger(__name__)
 
 
-def exists(val):
-    return val is not None
-
-
 # rotary embedding helper functions
 def rotate_half(x):
     x = x.reshape(*x.shape[:-1], -1, 2)
@@ -74,37 +70,20 @@ def apply_rotary_emb(freqs, t, start_index=0, scale=1.0, seq_dim=-2):
 
 
 # classes
-class RotaryEmbedding(Module):
+class MusicFlamingoRotaryEmbedding(Module):
     def __init__(
         self,
         dim,
-        theta=50000,
-        interpolate_factor=1.0,
-        theta_rescale_factor=1.0,
-        seq_before_head_dim=False,
-        cache_if_possible=True,
         max_time=7200,
     ):
         super().__init__()
 
         self.dim = dim
-        self.interpolate_factor = interpolate_factor
-        self.theta_rescale_factor = theta_rescale_factor
-        self.cache_if_possible = cache_if_possible
         self.max_time = max_time
 
         self.register_buffer("cached_freqs", None, persistent=False)
 
-        # Adjust theta to avoid angle wrapping after large times
-        if exists(max_time):
-            # Make sure highest frequency completes 1 full rotation over max time
-            # theta = base of exponent: higher theta → lower frequency range
-            # max_time * (1/theta^(0)) = 2pi  =>  theta = max_time / (2pi)
-            theta = max_time / (2 * pi)
-
-        theta *= theta_rescale_factor ** (dim / (dim - 2))
-
-        self.theta = theta
+        theta = max_time / (2 * pi) if max_time is not None else 50000
 
         freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
@@ -113,20 +92,6 @@ class RotaryEmbedding(Module):
         # dummy for device
 
         self.register_buffer("dummy", torch.tensor(0), persistent=False)
-
-        # default sequence dimension
-
-        self.seq_before_head_dim = seq_before_head_dim
-        self.default_seq_dim = -3 if seq_before_head_dim else -2
-
-        # interpolation factors
-
-        assert interpolate_factor >= 1.0
-        self.interpolate_factor = interpolate_factor
-
-        # add apply_rotary_emb as static method
-
-        self.apply_rotary_emb = staticmethod(apply_rotary_emb)
 
     @property
     def device(self):
@@ -152,9 +117,9 @@ class RotaryEmbedding(Module):
 
     @autocast("cuda", enabled=False)
     def forward(self, t: Tensor, seq_len=None, offset=0):
-        should_cache = self.cache_if_possible and exists(seq_len)
+        should_cache = seq_len is not None
 
-        if should_cache and exists(self.cached_freqs) and (offset + seq_len) <= self.cached_freqs.shape[0]:
+        if should_cache and self.cached_freqs is not None and (offset + seq_len) <= self.cached_freqs.shape[0]:
             return self.cached_freqs[offset : (offset + seq_len)].detach()
 
         freqs = self.freqs
@@ -176,19 +141,12 @@ class MusicFlamingoPreTrainedModel(AudioFlamingo3PreTrainedModel):
     @torch.no_grad()
     def _init_weights(self, module):
         """Initialize the weights for MusicFlamingo-specific modules."""
-        if isinstance(module, RotaryEmbedding):
+        if isinstance(module, MusicFlamingoRotaryEmbedding):
             # Reinitialize freqs parameter
             dim = module.dim
             max_time = module.max_time
-            theta_rescale_factor = module.theta_rescale_factor
 
-            # Adjust theta
-            if max_time is not None:
-                theta = max_time / (2 * pi)
-            else:
-                theta = 50000  # default value
-
-            theta *= theta_rescale_factor ** (dim / (dim - 2))
+            theta = max_time / (2 * pi) if max_time is not None else 50000
 
             # Generate freqs
             freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
@@ -214,7 +172,7 @@ class MusicFlamingoEncoder(AudioFlamingo3Encoder):
 
     def __init__(self, config: MusicFlamingoConfig):
         super().__init__(config)
-        self.pos_emb = RotaryEmbedding(dim=256, max_time=1200.0)
+        self.pos_emb = MusicFlamingoRotaryEmbedding(dim=256, max_time=1200.0)
 
     @can_return_tuple
     def forward(
