@@ -13,20 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ...configuration_utils import PretrainedConfig
 from ...utils import logging
-from ..auto import CONFIG_MAPPING, AutoConfig
+from ..audioflamingo3.configuration_audioflamingo3 import AudioFlamingo3Config, AudioFlamingo3EncoderConfig
+from ..auto import AutoConfig
 
 
 logger = logging.get_logger(__name__)
 
 
-class MusicFlamingoEncoderConfig(PretrainedConfig):
+class MusicFlamingoEncoderConfig(AudioFlamingo3EncoderConfig):
     r"""
-    This is the configuration class to store the configuration of an [`MusicFlamingoEncoder`]. It is used to instantiate an
-    MusicFlamingo audio encoder according to the specified arguments, defining the model architecture. Instantiating a
-    configuration with the defaults will yield a similar configuration to that of the audio encoder of the MusicFlamingo
-    architecture.
+    This is the configuration class to store the configuration of a [`MusicFlamingoEncoder`].
 
     e.g. [nvidia/music-flamingo-hf](https://huggingface.co/nvidia/music-flamingo-hf)
 
@@ -81,54 +78,10 @@ class MusicFlamingoEncoderConfig(PretrainedConfig):
 
     model_type = "musicflamingo_encoder"
 
-    attribute_map = {
-        "d_model": "hidden_size",
-        "encoder_layers": "num_hidden_layers",
-        "encoder_attention_heads": "num_attention_heads",
-        "encoder_ffn_dim": "intermediate_size",
-        "encoder_layerdrop": "layerdrop",
-    }
 
-    def __init__(
-        self,
-        num_mel_bins=128,
-        num_hidden_layers=32,
-        num_attention_heads=20,
-        intermediate_size=5120,
-        layerdrop=0.0,
-        activation_function="gelu",
-        hidden_size=1280,
-        dropout=0.0,
-        attention_dropout=0.0,
-        activation_dropout=0.0,
-        initializer_range=0.02,
-        scale_embedding=False,
-        max_source_positions=1500,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-
-        self.num_mel_bins = num_mel_bins
-        self.hidden_size = hidden_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-        self.intermediate_size = intermediate_size
-        self.dropout = dropout
-        self.attention_dropout = attention_dropout
-        self.activation_dropout = activation_dropout
-        self.activation_function = activation_function
-        self.initializer_range = initializer_range
-        self.layerdrop = layerdrop
-        self.num_hidden_layers = num_hidden_layers
-        self.scale_embedding = scale_embedding
-        self.max_source_positions = max_source_positions
-
-
-class MusicFlamingoConfig(PretrainedConfig):
+class MusicFlamingoConfig(AudioFlamingo3Config):
     r"""
-    This is the configuration class to store the configuration of an [`MusicFlamingoForConditionalGeneration`]. It is used to instantiate an
-    MusicFlamingo model according to the specified arguments, defining the model architecture. Instantiating a configuration
-    with the defaults will yield a similar configuration to that of the MusicFlamingo.
+    This is the configuration class to store the configuration of a [`MusicFlamingoForConditionalGeneration`].
 
     e.g. [nvidia/music-flamingo-hf](https://huggingface.co/nvidia/music-flamingo-hf)
 
@@ -183,27 +136,19 @@ class MusicFlamingoConfig(PretrainedConfig):
         projector_bias=True,
         **kwargs,
     ):
-        self.audio_token_id = audio_token_id
-
         if isinstance(audio_config, dict):
             audio_config["model_type"] = audio_config.get("model_type", "musicflamingo_encoder")
-            audio_config = CONFIG_MAPPING[audio_config["model_type"]](**audio_config)
         elif audio_config is None:
-            audio_config = CONFIG_MAPPING["musicflamingo_encoder"]()
+            audio_config = {"model_type": "musicflamingo_encoder"}
 
-        self.audio_config = audio_config
-
-        if isinstance(text_config, dict):
-            text_config["model_type"] = text_config.get("model_type", "qwen2")
-            text_config = CONFIG_MAPPING[text_config["model_type"]](**text_config)
-        elif text_config is None:
-            text_config = CONFIG_MAPPING["qwen2"]()
-
-        self.text_config = text_config
-        self.projector_hidden_act = projector_hidden_act
-        self.projector_bias = projector_bias
-
-        super().__init__(**kwargs)
+        super().__init__(
+            audio_config=audio_config,
+            text_config=text_config,
+            audio_token_id=audio_token_id,
+            projector_hidden_act=projector_hidden_act,
+            projector_bias=projector_bias,
+            **kwargs,
+        )
 
 
 __all__ = ["MusicFlamingoConfig", "MusicFlamingoEncoderConfig"]
