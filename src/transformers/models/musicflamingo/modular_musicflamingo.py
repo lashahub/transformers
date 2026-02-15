@@ -13,17 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 from math import pi
 
+import numpy as np
 import torch
 from torch import Tensor, broadcast_tensors, nn
 from torch.amp import autocast
 from torch.nn import Module
 
+from ...audio_utils import AudioInput, make_list_of_audio
 from ...cache_utils import Cache
+from ...feature_extraction_utils import BatchFeature
 from ...masking_utils import create_bidirectional_mask
 from ...modeling_outputs import BaseModelOutput, CausalLMOutputWithPast
 from ...processing_utils import Unpack
+from ...tokenization_utils_base import TextInput
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from ..audioflamingo3.modeling_audioflamingo3 import (
     AudioFlamingo3Encoder,
@@ -31,10 +36,134 @@ from ..audioflamingo3.modeling_audioflamingo3 import (
     AudioFlamingo3MultiModalProjector,
     AudioFlamingo3PreTrainedModel,
 )
+from ..audioflamingo3.processing_audioflamingo3 import AudioFlamingo3Processor, AudioFlamingo3ProcessorKwargs
 from .configuration_musicflamingo import MusicFlamingoConfig
 
 
 logger = logging.get_logger(__name__)
+
+
+class MusicFlamingoProcessorKwargs(AudioFlamingo3ProcessorKwargs): ...
+
+
+MAX_AUDIO_LEN = 20 * 60  # 20 minutes
+
+
+class MusicFlamingoProcessor(AudioFlamingo3Processor):
+    def __init__(
+        self,
+        feature_extractor,
+        tokenizer,
+        chat_template=None,
+        audio_token="<sound>",
+        audio_bos_token="<|sound_bos|>",
+        audio_eos_token="<|sound_eos|>",
+        default_transcription_prompt="Transcribe the input speech.",
+        max_audio_len=MAX_AUDIO_LEN,
+    ):
+        super().__init__(
+            feature_extractor,
+            tokenizer,
+            chat_template=chat_template,
+            audio_token=audio_token,
+            default_transcription_prompt=default_transcription_prompt,
+            max_audio_len=max_audio_len,
+        )
+        self.audio_bos_token = audio_bos_token
+        self.audio_eos_token = audio_eos_token
+        self.audio_bos_token_id = tokenizer.convert_tokens_to_ids(audio_bos_token)
+        self.audio_eos_token_id = tokenizer.convert_tokens_to_ids(audio_eos_token)
+
+    def __call__(
+        self,
+        text: TextInput | list[TextInput],
+        audio: AudioInput | None = None,
+        output_labels: bool | None = False,
+        **kwargs: Unpack[MusicFlamingoProcessorKwargs],
+    ) -> BatchFeature:
+        call_kwargs = self._merge_kwargs(
+            MusicFlamingoProcessorKwargs,
+            tokenizer_init_kwargs=self.tokenizer.init_kwargs,
+            **kwargs,
+        )
+
+        text_kwargs = call_kwargs["text_kwargs"]
+        audio_kwargs = call_kwargs["audio_kwargs"]
+        return_tensors = text_kwargs.get("return_tensors")
+        if return_tensors != "pt":
+            raise ValueError(f"{self.__class__.__name__} only supports `return_tensors='pt'`.")
+
+        if isinstance(text, str):
+            text = [text]
+        elif not (isinstance(text, (list, tuple)) and all(isinstance(t, str) for t in text)):
+            raise ValueError("Invalid input text. Please provide a string, or a list of strings")
+
+        audio_inputs = {}
+        if audio is not None:
+            audio = make_list_of_audio(audio)
+            if len(text) != len(audio):
+                raise ValueError(f"Got {len(text)} text but {len(audio)} audios; they must match 1:1.")
+
+            window_size = int(audio_kwargs["sampling_rate"] * audio_kwargs["chunk_length"])
+            max_windows = int(self.max_audio_len // audio_kwargs["chunk_length"])
+
+            per_sample_windows: list[int] = []
+            flat_chunks: list[np.ndarray] = []
+            audio_times_list: list[torch.Tensor] = []
+
+            for audio_el in audio:
+                n_samples = int(audio_el.shape[0])
+                n_win = max(1, (n_samples + window_size - 1) // window_size)
+                if n_win > max_windows:
+                    logger.warning(
+                        f"Audio duration ({n_samples / audio_kwargs['sampling_rate']:.1f}s) exceeds {self.max_audio_len}s; truncating to first {self.max_audio_len}s."
+                    )
+                    n_win = max_windows
+                per_sample_windows.append(n_win)
+
+                time_cap = min(n_samples, n_win * window_size)
+                for i in range(n_win):
+                    start = i * window_size
+                    end = min((i + 1) * window_size, time_cap)
+                    flat_chunks.append(audio_el[start:end])
+
+                    start_sec = start / audio_kwargs["sampling_rate"]
+                    chunk_times = torch.arange(750).float() * 0.04 + start_sec
+                    audio_times_list.append(chunk_times)
+
+            audio_inputs = self.feature_extractor(flat_chunks, **audio_kwargs)
+            padding_mask = audio_inputs.pop("attention_mask")
+            audio_inputs["input_features_mask"] = padding_mask
+            audio_inputs["audio_times"] = torch.stack(audio_times_list).to(dtype=torch.float32)
+
+            audio_lengths = torch.stack([s.sum() for s in torch.split(padding_mask.sum(-1), per_sample_windows)])
+            audio_tokens_lengths = self._get_audio_token_length(audio_lengths)
+
+            for i, audio_length in enumerate(audio_tokens_lengths):
+                text[i] = re.sub(
+                    re.escape(self.audio_token),
+                    self.audio_bos_token + self.audio_token * audio_length + self.audio_eos_token,
+                    text[i],
+                )
+
+        text_inputs = self.tokenizer(text, **text_kwargs)
+
+        data = {**text_inputs, **audio_inputs}
+        if output_labels:
+            labels = data["input_ids"].clone()
+            labels[labels == self.audio_token_id] = -100
+            labels[labels == self.audio_bos_token_id] = -100
+            labels[labels == self.audio_eos_token_id] = -100
+            labels[labels == self.tokenizer.pad_token_id] = -100
+            data["labels"] = labels
+
+        return BatchFeature(data=data, tensor_type=return_tensors)
+
+    @property
+    def model_input_names(self) -> list[str]:
+        tok_names = self.tokenizer.model_input_names
+        fea_names = self.feature_extractor.model_input_names
+        return list(dict.fromkeys(tok_names + fea_names + ["input_features_mask", "audio_times"]))
 
 
 # rotary embedding helper functions
@@ -406,4 +535,9 @@ class MusicFlamingoForConditionalGeneration(AudioFlamingo3ForConditionalGenerati
         return model_inputs
 
 
-__all__ = ["MusicFlamingoForConditionalGeneration", "MusicFlamingoPreTrainedModel", "MusicFlamingoEncoder"]
+__all__ = [
+    "MusicFlamingoProcessor",
+    "MusicFlamingoForConditionalGeneration",
+    "MusicFlamingoPreTrainedModel",
+    "MusicFlamingoEncoder",
+]
