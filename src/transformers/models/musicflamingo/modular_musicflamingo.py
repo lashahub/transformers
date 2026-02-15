@@ -392,8 +392,7 @@ class MusicFlamingoForConditionalGeneration(AudioFlamingo3ForConditionalGenerati
         input_features_mask: torch.Tensor,
         audio_times: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
-        # Encode audio with dtype conversion and audio_times
-        input_features = input_features.to(dtype=self.audio_tower.conv1.weight.dtype)
+        # Encode audio with audio_times
         encoder_output = self.audio_tower(
             input_features, input_features_mask=input_features_mask, audio_times=audio_times
         )

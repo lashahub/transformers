@@ -77,7 +77,7 @@ inputs = processor.apply_chat_template(
     tokenize=True,
     add_generation_prompt=True,
     return_dict=True,
-).to(model.device)
+).to(model.device, dtype=model.dtype)
 
 outputs = model.generate(**inputs, max_new_tokens=500)
 
@@ -122,7 +122,7 @@ inputs = processor.apply_chat_template(
     tokenize=True,
     add_generation_prompt=True,
     return_dict=True,
-).to(model.device)
+).to(model.device, dtype=model.dtype)
 
 outputs = model.generate(**inputs, max_new_tokens=500)
 
@@ -171,7 +171,7 @@ inputs = processor.apply_chat_template(
     tokenize=True,
     add_generation_prompt=True,
     return_dict=True,
-).to(model.device)
+).to(model.device, dtype=model.dtype)
 
 outputs = model.generate(**inputs, max_new_tokens=500)
 
@@ -228,7 +228,7 @@ inputs = processor.apply_chat_template(
     add_generation_prompt=True,
     return_dict=True,
     output_labels=True,
-).to(model.device)
+).to(model.device, dtype=model.dtype)
 
 loss = model(**inputs).loss
 loss.backward()

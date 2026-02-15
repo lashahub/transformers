@@ -108,9 +108,9 @@ class MusicFlamingoProcessor(ProcessorMixin):
 
     def __call__(
         self,
-        text: Union[TextInput, list[TextInput]],
-        audio: Optional[AudioInput] = None,
-        output_labels: Optional[bool] = False,
+        text: TextInput | list[TextInput],
+        audio: AudioInput | None = None,
+        output_labels: bool | None = False,
         **kwargs: Unpack[MusicFlamingoProcessorKwargs],
     ) -> BatchFeature:
         r"""
